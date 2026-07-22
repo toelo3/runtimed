@@ -1102,7 +1102,7 @@ fn default_debugger() -> bool {
     false
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum CodeMirrorMode {
     Simple(String),
@@ -1113,6 +1113,39 @@ pub enum CodeMirrorMode {
 pub struct CodeMirrorModeObject {
     pub name: String,
     pub version: usize,
+}
+
+impl<'de> Deserialize<'de> for CodeMirrorMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+
+        match value {
+            Value::String(mode) => Ok(Self::Simple(mode)),
+            Value::Object(object) => {
+                let name = object.get("name").and_then(Value::as_str).ok_or_else(|| {
+                    serde::de::Error::custom("CodeMirror mode object has no name")
+                })?;
+
+                match object.get("version") {
+                    Some(version) => {
+                        let version =
+                            usize::deserialize(version).map_err(serde::de::Error::custom)?;
+                        Ok(Self::CustomMode {
+                            name: name.to_string(),
+                            version,
+                        })
+                    }
+                    None => Ok(Self::Simple(name.to_string())),
+                }
+            }
+            value => Err(serde::de::Error::custom(format!(
+                "expected a CodeMirror mode string or object, got {value}"
+            ))),
+        }
+    }
 }
 
 impl CodeMirrorMode {
@@ -1432,7 +1465,7 @@ pub struct ErrorOutput {
 /// See [Comm Open](https://jupyter-client.readthedocs.io/en/latest/messaging.html#opening-a-comm).
 ///
 /// Comm messages are one-way communications to update comm state, used for
-/// synchronizing widget state, or simply requesting actions of a comm’s
+/// synchronizing widget state, or simply requesting actions of a comm's
 /// counterpart.
 ///
 /// Opening a Comm produces a `comm_open` message, to be sent to the other side:
@@ -1476,7 +1509,7 @@ impl Default for CommOpen {
 /// A `comm_msg` message on the `iopub` channel.
 ///
 /// Comm messages are one-way communications to update comm state, used for
-/// synchronizing widget state, or simply requesting actions of a comm’s
+/// synchronizing widget state, or simply requesting actions of a comm's
 /// counterpart.
 ///
 /// Essentially, each comm pair defines their own message specification
@@ -2734,5 +2767,71 @@ mod test {
 
         let reply: KernelInfoReply = serde_json::from_value(reply_json).unwrap();
         assert_eq!(reply.status, ReplyStatus::Error);
+    }
+
+    #[test]
+    fn codemirror_mode_simple_string() {
+        let json = r#""r""#;
+        let result = serde_json::from_str::<CodeMirrorMode>(json);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), CodeMirrorMode::Simple(s) if s == "r"));
+    }
+
+    #[test]
+    fn codemirror_mode_object_with_version() {
+        let json = r#"{"name":"ipython","version":3}"#;
+        let result = serde_json::from_str::<CodeMirrorMode>(json);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            CodeMirrorMode::CustomMode { name, version } => {
+                assert_eq!(name, "ipython");
+                assert_eq!(version, 3);
+            }
+            _ => panic!("Expected CustomMode"),
+        }
+    }
+
+    #[test]
+    fn codemirror_mode_object_without_version() {
+        let json = r#"{"name":"typescript"}"#;
+        let result = serde_json::from_str::<CodeMirrorMode>(json);
+        assert!(
+            result.is_ok(),
+            "should accept {{\"name\":\"typescript\"}}: {:?}",
+            result.err()
+        );
+        assert!(matches!(
+            result.unwrap(),
+            CodeMirrorMode::Simple(name) if name == "typescript"
+        ));
+    }
+
+    #[test]
+    fn kernel_info_reply_deno_codemirror_mode() {
+        let reply_json = json!({
+            "status": "ok",
+            "protocol_version": "5.3",
+            "implementation": "Deno kernel",
+            "implementation_version": "2.9.3",
+            "language_info": {
+                "name": "typescript",
+                "version": "5.8.3",
+                "mimetype": "text/x.typescript",
+                "file_extension": ".ts",
+                "pygments_lexer": "typescript",
+                "codemirror_mode": {"name": "typescript"},
+                "nbconvert_exporter": "script"
+            },
+            "banner": "Welcome to Deno kernel",
+            "help_links": [{"text": "Visit Deno manual", "url": "https://docs.deno.com"}],
+            "debugger": false
+        });
+
+        let reply: KernelInfoReply = serde_json::from_value(reply_json).unwrap();
+        let mode = reply.language_info.codemirror_mode.unwrap();
+        assert!(matches!(
+            mode,
+            CodeMirrorMode::Simple(name) if name == "typescript"
+        ));
     }
 }
